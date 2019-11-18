@@ -106,13 +106,16 @@ several edts nodes on the same host.")
                         edts-node-sname
                         edts-erl-flags))
          (retries edts-api-num-server-start-retries)
+         end-time
          available)
     (edts-shell-make-comint-buffer "*edts-server*" edts-node-sname pwd command)
     (setq available (edts-api-get-nodes t))
-    (while (and (> retries 0) (not available))
+    (setq end-time (+ (float-time)
+                      (* edts-api-num-server-start-retries
+                         edts-api-server-start-retry-interval)))
+    (while (and (< (float-time) end-time) (not available))
       (setq available (edts-api-get-nodes t))
-      (sit-for edts-api-server-start-retry-interval)
-      (decf retries))
+      (sit-for edts-api-server-start-retry-interval))
     (when available
       (edts-log-info "Started EDTS server")
       (run-hooks 'edts-api-server-up-hook))
