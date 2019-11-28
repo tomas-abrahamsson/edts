@@ -167,19 +167,22 @@ handle_call({init_node,
             _From,
             State0) ->
   edts_log:info("Initializing ~p.", [NodeName]),
+  IsStored = node_find(NodeName, State0) /= false,
   case do_init_node(ProjectName,
                     NodeName,
                     ProjectRoot,
                     LibDirs,
                     AppInclDirs,
                     SysInclDirs,
-                    ErlangCookie) of
+                    ErlangCookie,
+                    if IsStored     -> existing_node;
+                       not IsStored -> new_node
+                    end) of
     ok ->
       edts_log:debug("Initialization call done on ~p.", [NodeName]),
       State =
-        case node_find(NodeName, State0) of
-          #node{} -> State0;
-          false   -> node_store(#node{name = NodeName}, State0)
+        if IsStored     -> State0;
+           not IsStored -> node_store(#node{name = NodeName}, State0)
         end,
       {reply, ok, State};
     {error, _} = Err ->
@@ -267,7 +270,8 @@ code_change(_OldVsn, State, _Extra) ->
                    LibDirs        :: [filename:filename()],
                    AppIncludeDirs :: [filename:filename()],
                    SysIncludeDirs :: [filename:filename()],
-                   ErlangCookie   :: string()) -> [rpc:key()].
+                   ErlangCookie   :: string(),
+                   new_node | existing_node) -> [rpc:key()].
 %%------------------------------------------------------------------------------
 do_init_node(ProjectName,
              Node,
@@ -275,30 +279,42 @@ do_init_node(ProjectName,
              LibDirs,
              AppIncludeDirs,
              ProjectIncludeDirs,
-             ErlangCookie) ->
+             ErlangCookie,
+             NodeInitializationState) ->
   try
     case ErlangCookie of
       undefined -> ok;
       _         -> ok = edts_dist:set_cookie(Node, list_to_atom(ErlangCookie))
     end,
-    Plugins = edts_plugins:names(),
-    edts_plugins:specs(),
-    ok = lists:foreach(fun(Spec) -> edts_dist:load_app(Node, Spec) end,
-                       edts_plugins:specs()),
-    PluginRemoteLoad =
-      lists:flatmap(fun(Plugin) -> Plugin:project_node_modules() end, Plugins),
-    PluginRemoteServices =
-      lists:flatmap(fun(Plugin) -> Plugin:project_node_services() end, Plugins),
+    RemoteServices =
+      case NodeInitializationState of
+        new_node ->
+          Plugins = edts_plugins:names(),
+          edts_plugins:specs(),
+          ok = lists:foreach(fun(Spec) -> edts_dist:load_app(Node, Spec) end,
+                             edts_plugins:specs()),
+          PluginRemoteLoad =
+            lists:flatmap(fun(Plugin) -> Plugin:project_node_modules() end,
+                          Plugins),
+          PluginRemoteServices =
+            lists:flatmap(fun(Plugin) -> Plugin:project_node_services() end,
+                          Plugins),
 
-    ModulesToLoad = [edts_code,
-                     edts_eunit,
-                     edts_eunit_listener,
-                     edts_event,
-                     edts_module_server,
-                     edts_plugins,
-                     edts_util] ++ PluginRemoteLoad,
-    edts_log:debug("Loading modules on ~p: ~p", [Node, ModulesToLoad]),
-    ok = edts_dist:remote_load_modules(Node, ModulesToLoad),
+          ModulesToLoad = [edts_code,
+                           edts_eunit,
+                           edts_eunit_listener,
+                           edts_event,
+                           edts_module_server,
+                           edts_plugins,
+                           edts_util] ++ PluginRemoteLoad,
+          edts_log:debug("Loading modules on ~p: ~p", [Node, ModulesToLoad]),
+          ok = edts_dist:remote_load_modules(Node, ModulesToLoad),
+          [edts_code] ++ PluginRemoteServices;
+        existing_node ->
+          %% Code already loaded, do not load again, that could kill
+          %% running plugin processes.
+          []
+      end,
 
     {ok, ProjectDir} = application:get_env(edts, project_data_dir),
     AppEnv = [{server_node,          node()},
@@ -312,7 +328,7 @@ do_init_node(ProjectName,
     edts_log:debug("Initalizing ~p with environment: ~p", [Node, AppEnv]),
     edts_dist:init_node(Node, AppEnv),
 
-    start_services(Node, [edts_code] ++ PluginRemoteServices)
+    start_services(Node, RemoteServices)
   catch
     ?EXCEPTION(C,E,S) ->
       edts_log:error("~p initialization crashed with ~p:~p~nStacktrace:~n~p",
