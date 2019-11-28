@@ -73,9 +73,18 @@ allowed_checks() -> [undefined_function_calls, unused_exports].
 %% @doc
 %% Starts the edts xref-server on the local node.
 %% @end
--spec start() -> {ok, pid()} | {error, already_started}.
+-spec start() -> ok.
 %%------------------------------------------------------------------------------
 start() ->
+  %% Ensure this is not executed concurrently. (This runs in the
+  %% background and on a large project, it could get invoked again
+  %% if the user opens a new .erl file quickly enough.)
+  %% This is to avoid the xref_servert starting to consume 100% cpu.
+  global:trans({{?MODULE, startup}, self()},
+               fun start_aux/0,
+               [node()]).
+
+start_aux() ->
   File = xref_file(),
   try
     case read_file(File) of
